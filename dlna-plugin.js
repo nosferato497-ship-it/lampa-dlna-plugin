@@ -1,6 +1,6 @@
 /**
  * DLNA Plugin for Lampa
- * Version: 1.3.0
+ * Version: 1.4.0
  * Target: Android TV (Xiaomi Mi Box S 4K)
  */
 (function () {
@@ -9,10 +9,10 @@
     if (window.dlna_plugin_ready) return;
     window.dlna_plugin_ready = true;
 
-    const VERSION = '1.3.0';
+    const VERSION = '1.4.0';
 
     // ============================================================
-    // ХРАНИЛИЩЕ СЕРВЕРОВ
+    // ХРАНИЛИЩЕ
     // ============================================================
     const DLNAServers = {
         get()      { return Lampa.Storage.get('dlna_servers', []); },
@@ -33,7 +33,7 @@
     };
 
     // ============================================================
-    // СЕТЕВЫЕ ФУНКЦИИ
+    // СЕТЬ
     // ============================================================
     const PATHS_TO_TRY = [
         '/rootDesc.xml', '/description.xml', '/',
@@ -377,70 +377,58 @@
     }
 
     // ============================================================
-    // ДОБАВЛЕНИЕ ПУНКТА В МЕНЮ (УНИВЕРСАЛЬНЫЙ ПОДХОД)
+    // ОТКРЫТИЕ ЭКРАНА СПИСКА СЕРВЕРОВ (с закрытием настроек)
     // ============================================================
-    function addDLNAMenuItem() {
-        const menuSelector = '.menu .menu__list';
-        let added = false;
-
-        // Функция, которая пытается добавить пункт в найденные списки
-        const tryAdd = () => {
-            const $lists = $(menuSelector);
-            if (!$lists.length) return false; // меню ещё нет
-
-            // Пробуем добавить в оба списка (верхний и нижний), чтобы наверняка
-            $lists.each(function (index) {
-                const $list = $(this);
-                if ($list.find('.menu__item--dlna').length) {
-                    added = true; // уже есть
-                    return;
-                }
-
-                const btn = $(`
-                    <li class="menu__item selector menu__item--dlna">
-                        <div class="menu__ico">
-                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
-                                <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
-                            </svg>
-                        </div>
-                        <div class="menu__text">DLNA</div>
-                    </li>
-                `);
-
-                btn.on('hover:enter', () => {
-                    Lampa.Activity.push({ component: 'dlna_servers', title: 'DLNA серверы' });
-                });
-
-                $list.append(btn);
-                added = true;
-                console.log('DLNA: пункт меню добавлен в список', index);
-            });
-
-            return added;
-        };
-
-        // 1. Пробуем сразу
-        if (tryAdd()) {
-            return;
+    function openServersScreen() {
+        console.log('DLNA: openServersScreen called');
+        // Пытаемся закрыть настройки, чтобы Activity.push не блокировался
+        try {
+            if (typeof Lampa.Settings !== 'undefined' && typeof Lampa.Settings.close === 'function') {
+                Lampa.Settings.close();
+            } else if (typeof Lampa.Activity !== 'undefined') {
+                Lampa.Activity.backward();
+            }
+        } catch (e) {
+            console.warn('DLNA: settings close error', e);
         }
 
-        // 2. Если не вышло, устанавливаем MutationObserver на появление меню
-        const observer = new MutationObserver(function (mutations, obs) {
-            if (tryAdd()) {
-                obs.disconnect(); // прекращаем наблюдение
-                console.log('DLNA: пункт меню добавлен через MutationObserver');
-            }
-        });
-
-        observer.observe(document.body, { childList: true, subtree: true });
-
-        // 3. Дополнительная страховка: если через 60 секунд меню так и не появилось, прекращаем наблюдение
+        // Небольшая задержка, чтобы закрытие успело произойти
         setTimeout(() => {
-            if (!added) {
-                console.warn('DLNA: не удалось добавить пункт меню за 60 секунд');
-                observer.disconnect();
+            try {
+                Lampa.Activity.push({ component: 'dlna_servers', title: 'DLNA серверы' });
+                console.log('DLNA: Activity.push OK');
+            } catch (e) {
+                console.error('DLNA: Activity.push error', e);
+                Lampa.Noty.show('Не удалось открыть экран DLNA', { style: 'error' });
             }
-        }, 60000);
+        }, 400);
+    }
+
+    // ============================================================
+    // КНОПКА В ВЕРХНЕЙ ПАНЕЛИ (альтернативная точка входа)
+    // ============================================================
+    function addHeaderButton() {
+        // Пробуем несколько возможных контейнеров для верхней панели
+        const selectors = ['.head__actions', '.header__actions', '.top__actions', '.head .actions'];
+        let container = null;
+        for (const sel of selectors) {
+            const el = document.querySelector(sel);
+            if (el) { container = el; break; }
+        }
+        if (!container) {
+            console.log('DLNA: header container not found yet');
+            return false;
+        }
+        if (container.querySelector('.head__action--dlna')) return true; // уже есть
+
+        const btn = document.createElement('div');
+        btn.className = 'head__action head__action--dlna selector';
+        btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>';
+        btn.addEventListener('click', openServersScreen);
+        btn.addEventListener('hover:enter', openServersScreen);
+        container.appendChild(btn);
+        console.log('DLNA: header button added');
+        return true;
     }
 
     // ============================================================
@@ -460,21 +448,29 @@
             Lampa.SettingsApi.addParam({
                 component: 'dlna_plugin',
                 param: { name: 'dlna_enabled', type: 'trigger', default: true },
-                field: { name: 'Включить DLNA', description: 'Активировать пункт меню DLNA' }
+                field: { name: 'Включить DLNA', description: 'Активировать плагин' }
             });
+
+            // Кнопка управления серверами — используем type 'button'
             Lampa.SettingsApi.addParam({
                 component: 'dlna_plugin',
-                param: { name: 'dlna_manage', type: 'trigger', default: false },
-                field: { name: 'Управление серверами', description: 'Открыть список DLNA-серверов' },
-                onChange: () => {
-                    Lampa.Storage.set('dlna_manage', false);
-                    Lampa.Activity.push({ component: 'dlna_servers', title: 'DLNA серверы' });
-                }
+                param: { name: 'dlna_manage_btn', type: 'button', default: '' },
+                field: { name: 'Управление серверами' },
+                onChange: openServersScreen
             });
         } catch (e) { console.error('DLNA: settings error', e); }
 
-        // Запускаем универсальное добавление пункта меню
-        addDLNAMenuItem();
+        // Добавляем кнопку в верхнюю панель (несколько попыток)
+        let headerAttempts = 0;
+        const tryHeader = () => {
+            if (addHeaderButton()) return;
+            if (++headerAttempts > 20) {
+                console.warn('DLNA: header button could not be added after 20 attempts');
+                return;
+            }
+            setTimeout(tryHeader, 1000);
+        };
+        tryHeader();
     }
 
     if (window.appready) init();
