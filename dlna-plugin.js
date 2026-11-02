@@ -1,13 +1,13 @@
 /**
  * DLNA Plugin for Lampa
- * Version: 2.3.0 — forced native HTTP requests to bypass WebView CORS
+ * Version: 2.4.0 — fixed native request signature
  */
 (function () {
     'use strict';
     if (window.dlna_plugin_ready) return;
     window.dlna_plugin_ready = true;
 
-    const VERSION = '2.3.0';
+    const VERSION = '2.4.0';
 
     function noty(text, style, time) {
         try {
@@ -37,21 +37,15 @@
     };
 
     // ============================================================
-    // КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: ЗАПРОС ЧЕРЕЗ НАТИВНЫЙ МОСТ
+    // ИСПРАВЛЕННЫЙ НАТИВНЫЙ ЗАПРОС
     // ============================================================
-    function nativeRequest(url, options) {
+    function nativeRequest(params) {
         return new Promise((resolve, reject) => {
             try {
-                // Принудительно используем нативный режим Lampa
-                Lampa.Request.native(url, (data) => {
-                    resolve({
-                        ok: true,
-                        text: () => Promise.resolve(typeof data === 'string' ? data : JSON.stringify(data)),
-                        json: () => Promise.resolve(data)
-                    });
-                }, (error) => {
-                    reject(new Error(error || 'Native request failed'));
-                }, options);
+                Lampa.Request.native(params, {
+                    complite: (data) => resolve(data),
+                    error: (err) => reject(new Error(err || 'Native request failed'))
+                });
             } catch (e) {
                 reject(e);
             }
@@ -67,8 +61,8 @@
         for (const path of PATHS_TO_TRY) {
             const url = `http://${ip}:${port}${path}`;
             try {
-                const resp = await nativeRequest(url);
-                const text = await resp.text();
+                const data = await nativeRequest({ url: url, method: 'GET' });
+                const text = typeof data === 'string' ? data : JSON.stringify(data);
                 const doc = new DOMParser().parseFromString(text, 'text/xml');
                 if (doc.querySelector('device') || doc.querySelector('serviceList')) {
                     return { path, xml: text, doc };
@@ -100,17 +94,17 @@
 <Filter>*</Filter><StartingIndex>0</StartingIndex><RequestedCount>0</RequestedCount>
 <SortCriteria></SortCriteria></u:Browse></s:Body></s:Envelope>`;
 
-        // Для SOAP-запроса используем нативный мост с методом POST
-        const resp = await nativeRequest(controlURL, {
+        const data = await nativeRequest({
+            url: controlURL,
             method: 'POST',
             headers: {
                 'Content-Type': 'text/xml; charset="utf-8"',
                 'SOAPAction': '"urn:schemas-upnp-org:service:ContentDirectory:1#Browse"'
             },
-            body: soapBody
+            data: soapBody
         });
 
-        const text = await resp.text();
+        const text = typeof data === 'string' ? data : JSON.stringify(data);
         return parseBrowseResponse(text);
     }
 
@@ -170,7 +164,7 @@
     }
 
     // ============================================================
-    // UI (без изменений)
+    // UI
     // ============================================================
     function showServersList() {
         try {
