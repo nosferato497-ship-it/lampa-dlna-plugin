@@ -1,8 +1,12 @@
 /**
  * DLNA Plugin for Lampa
- * Version: 2.5.0
+ * Version: 2.5.1
  *
- * Изменения относительно 2.4.0:
+ * 2.5.1: меню больше не вызывает Select.close() (из-за этого срабатывал onBack
+ *        вместе с выбранным действием), индикатор загрузки с отменой, кеш папок,
+ *        таймаут поиска описания 4 с, без повторного запроса через XHR.
+ *
+ * Изменения 2.5.0 относительно 2.4.0:
  *  - сетевые запросы через new Lampa.Reguest().native(url, ok, err, post, params)
  *    с dataType: 'text'; запасной вариант — XMLHttpRequest
  *  - код переписан на ES5 (без ?., стрелок, async/await, let/const, шаблонных строк),
@@ -25,8 +29,9 @@
     if (window.dlna_plugin_ready) return;
     window.dlna_plugin_ready = true;
 
-    var VERSION = '2.5.0';
-    var REQUEST_TIMEOUT = 10000;
+    var VERSION = '2.5.1';
+    var REQUEST_TIMEOUT = 15000;   // Browse
+    var PROBE_TIMEOUT = 4000;      // поиск описания устройства
     var CONTROL_URL_TTL = 3600000;
     var BROWSE_PAGE = 200;
     var BROWSE_MAX = 5000;
@@ -47,10 +52,6 @@
 
     function later(fn, delay) {
         setTimeout(fn, typeof delay === 'number' ? delay : MENU_DELAY);
-    }
-
-    function closeSelect() {
-        try { Lampa.Select.close(); } catch (e) {}
     }
 
     function xmlEscape(str) {
@@ -208,11 +209,8 @@
         opts = opts || {};
         var hasLampa = false;
         try { hasLampa = typeof Lampa.Reguest === 'function'; } catch (e) {}
-        if (!hasLampa) return xhrRequest(url, opts);
-        return lampaRequest(url, opts).catch(function (err) {
-            // запасной вариант, если Reguest не справился
-            return xhrRequest(url, opts).catch(function () { throw err; });
-        });
+        // Без повторной попытки через XHR: она удваивала время ожидания
+        return hasLampa ? lampaRequest(url, opts) : xhrRequest(url, opts);
     }
 
     // ============================================================
@@ -243,7 +241,7 @@
             var path = paths[i++];
             if (path.charAt(0) !== '/') path = '/' + path;
             var url = baseOf(server) + path;
-            return request(url).then(function (text) {
+            return request(url, { timeout: PROBE_TIMEOUT }).then(function (text) {
                 var doc = parseXML(text);
                 if (isDeviceDescription(doc)) return { path: path, url: url, doc: doc };
                 return next();
@@ -409,25 +407,47 @@
         }
     }
 
+    // Lampa сама скрывает меню при выборе пункта (без вызова onBack),
+    // а при «Назад» сама закрывает его и вызывает onBack.
+    // Поэтому здесь НЕЛЬЗЯ вызывать Lampa.Select.close(): close() дергает onBack,
+    // и вместе с выбранным действием срабатывало ещё и «назад».
     function showMenu(title, items, onSelect, onBack) {
         Lampa.Select.show({
             title: title,
             items: items,
             onSelect: function (item) {
-                closeSelect();
                 later(function () {
                     try { onSelect(item); }
                     catch (e) {
                         console.error('DLNA menu error', e);
                         noty('Ошибка: ' + e.message, 'error', 5000);
                     }
-                });
+                }, 50);
             },
             onBack: function () {
-                closeSelect();
-                later(onBack || backToApp, 100);
+                later(function () {
+                    try { (onBack || backToApp)(); }
+                    catch (e) { console.error('DLNA back error', e); backToApp(); }
+                }, 50);
             }
         });
+    }
+
+    // Индикатор загрузки, чтобы было видно, что идёт работа
+    var spinnerOn = false;
+    function spinner(on, onCancel) {
+        try {
+            if (on && !spinnerOn) {
+                spinnerOn = true;
+                Lampa.Loading.start(function () {
+                    spinner(false);
+                    if (onCancel) onCancel();
+                });
+            } else if (!on && spinnerOn) {
+                spinnerOn = false;
+                Lampa.Loading.stop();
+            }
+        } catch (e) { spinnerOn = on; }
     }
 
     function showServersList() {
@@ -464,11 +484,13 @@
     }
 
     function reprobe(srv) {
-        noty('Проверка подключения…');
+        spinner(true);
         ensureControlURL(srv, true).then(function (ctrl) {
+            spinner(false);
             noty(ctrl ? 'Сервер найден' : 'Сервер не найден', ctrl ? null : 'error', 4000);
             openServerMenu(srv);
         }, function (e) {
+            spinner(false);
             noty('Ошибка: ' + e.message, 'error', 5000);
             openServerMenu(srv);
         });
@@ -542,8 +564,9 @@
     }
 
     function saveServer(data) {
-        noty('Проверка подключения…');
+        spinner(true);
         discover(data).then(function (res) {
+            spinner(false);
             if (!res) {
                 noty('Сервер не отвечает. Проверьте IP и порт.', 'error', 5000);
                 showServersList();
@@ -564,6 +587,7 @@
             noty('Готово: ' + data.name);
             showServersList();
         }).catch(function (e) {
+            spinner(false);
             console.error('saveServer error', e);
             noty('Ошибка: ' + e.message, 'error', 5000);
             showServersList();
@@ -608,7 +632,10 @@
     function goBack() {
         if (navStack.length > 1) {
             navStack.pop();
-            showFolder();
+            var prev = navStack[navStack.length - 1];
+            // папка уже загружалась — показываем из кеша без запроса
+            if (prev.items) renderFolder(prev, prev.items);
+            else showFolder();
         } else {
             var srv = navStack[0] && navStack[0].srv;
             navStack = [];
@@ -635,18 +662,28 @@
         var srv = cur.srv;
 
         loading = true;
-        noty('Загрузка…');
+        var cancelled = false;
+        spinner(true, function () {
+            cancelled = true;
+            loading = false;
+            goBack();
+        });
 
         loadItems(srv, cur.objectId).then(function (items) {
+            if (cancelled) return;
             loading = false;
+            spinner(false);
             if (!items.length) {
                 noty('Папка пуста');
                 goBack();
                 return;
             }
+            cur.items = items;
             renderFolder(cur, items);
         }, function (e) {
+            if (cancelled) return;
             loading = false;
+            spinner(false);
             console.error('DLNA browse error', e);
             noty('Ошибка загрузки: ' + e.message, 'error', 5000);
             goBack();
