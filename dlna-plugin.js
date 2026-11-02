@@ -1,6 +1,6 @@
 /**
  * DLNA Plugin for Lampa
- * Version: 1.2.0
+ * Version: 1.3.0
  * Target: Android TV (Xiaomi Mi Box S 4K)
  */
 (function () {
@@ -9,7 +9,7 @@
     if (window.dlna_plugin_ready) return;
     window.dlna_plugin_ready = true;
 
-    const VERSION = '1.2.0';
+    const VERSION = '1.3.0';
 
     // ============================================================
     // ХРАНИЛИЩЕ СЕРВЕРОВ
@@ -33,7 +33,7 @@
     };
 
     // ============================================================
-    // СЕТЕВЫЕ ФУНКЦИИ (без изменений)
+    // СЕТЕВЫЕ ФУНКЦИИ
     // ============================================================
     const PATHS_TO_TRY = [
         '/rootDesc.xml', '/description.xml', '/',
@@ -130,7 +130,7 @@
     }
 
     // ============================================================
-    // CSS (без изменений)
+    // CSS
     // ============================================================
     function injectStyles() {
         Lampa.Utils.putStyle(`
@@ -156,7 +156,7 @@
     }
 
     // ============================================================
-    // КОМПОНЕНТЫ (без изменений)
+    // КОМПОНЕНТЫ
     // ============================================================
     if (typeof Lampa !== 'undefined' && Lampa.Component) {
         Lampa.Component.add('dlna_servers', {
@@ -377,50 +377,70 @@
     }
 
     // ============================================================
-    // ДОБАВЛЕНИЕ ПУНКТА В МЕНЮ (ИСПРАВЛЕНО)
+    // ДОБАВЛЕНИЕ ПУНКТА В МЕНЮ (УНИВЕРСАЛЬНЫЙ ПОДХОД)
     // ============================================================
-    function addDLNAMenuItem(attempt) {
-        attempt = attempt || 0;
-        // Увеличиваем количество попыток и интервал: меню на TV может строиться дольше
-        if (attempt > 30) {
-            console.warn('DLNA: не удалось найти меню после 30 попыток');
+    function addDLNAMenuItem() {
+        const menuSelector = '.menu .menu__list';
+        let added = false;
+
+        // Функция, которая пытается добавить пункт в найденные списки
+        const tryAdd = () => {
+            const $lists = $(menuSelector);
+            if (!$lists.length) return false; // меню ещё нет
+
+            // Пробуем добавить в оба списка (верхний и нижний), чтобы наверняка
+            $lists.each(function (index) {
+                const $list = $(this);
+                if ($list.find('.menu__item--dlna').length) {
+                    added = true; // уже есть
+                    return;
+                }
+
+                const btn = $(`
+                    <li class="menu__item selector menu__item--dlna">
+                        <div class="menu__ico">
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+                                <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
+                            </svg>
+                        </div>
+                        <div class="menu__text">DLNA</div>
+                    </li>
+                `);
+
+                btn.on('hover:enter', () => {
+                    Lampa.Activity.push({ component: 'dlna_servers', title: 'DLNA серверы' });
+                });
+
+                $list.append(btn);
+                added = true;
+                console.log('DLNA: пункт меню добавлен в список', index);
+            });
+
+            return added;
+        };
+
+        // 1. Пробуем сразу
+        if (tryAdd()) {
             return;
         }
 
-        // Используем jQuery-селектор, рекомендованный в документации Lampa
-        const $menuList = $('.menu .menu__list').eq(0);
-
-        if (!$menuList.length) {
-            console.log('DLNA: меню ещё не готово, повторная попытка', attempt + 1);
-            setTimeout(() => addDLNAMenuItem(attempt + 1), 500);
-            return;
-        }
-
-        // Проверяем, не добавлен ли уже пункт
-        if ($menuList.find('.menu__item--dlna').length) {
-            console.log('DLNA: пункт меню уже существует');
-            return;
-        }
-
-        console.log('DLNA: добавляем пункт в главное меню');
-        const btn = $(`
-            <li class="menu__item selector menu__item--dlna">
-                <div class="menu__ico">
-                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
-                        <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
-                    </svg>
-                </div>
-                <div class="menu__text">DLNA</div>
-            </li>
-        `);
-
-        btn.on('hover:enter', () => {
-            console.log('DLNA: пункт меню нажат');
-            Lampa.Activity.push({ component: 'dlna_servers', title: 'DLNA серверы' });
+        // 2. Если не вышло, устанавливаем MutationObserver на появление меню
+        const observer = new MutationObserver(function (mutations, obs) {
+            if (tryAdd()) {
+                obs.disconnect(); // прекращаем наблюдение
+                console.log('DLNA: пункт меню добавлен через MutationObserver');
+            }
         });
 
-        $menuList.append(btn);
-        console.log('DLNA: пункт меню успешно добавлен');
+        observer.observe(document.body, { childList: true, subtree: true });
+
+        // 3. Дополнительная страховка: если через 60 секунд меню так и не появилось, прекращаем наблюдение
+        setTimeout(() => {
+            if (!added) {
+                console.warn('DLNA: не удалось добавить пункт меню за 60 секунд');
+                observer.disconnect();
+            }
+        }, 60000);
     }
 
     // ============================================================
@@ -453,7 +473,7 @@
             });
         } catch (e) { console.error('DLNA: settings error', e); }
 
-        // Запускаем добавление пункта меню с небольшой задержкой
+        // Запускаем универсальное добавление пункта меню
         addDLNAMenuItem();
     }
 
