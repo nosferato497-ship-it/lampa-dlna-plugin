@@ -1,7 +1,6 @@
 /**
  * DLNA Plugin for Lampa
- * Version: 1.4.0
- * Target: Android TV (Xiaomi Mi Box S 4K)
+ * Version: 1.5.0
  */
 (function () {
     'use strict';
@@ -9,7 +8,7 @@
     if (window.dlna_plugin_ready) return;
     window.dlna_plugin_ready = true;
 
-    const VERSION = '1.4.0';
+    const VERSION = '1.5.0';
 
     // ============================================================
     // ХРАНИЛИЩЕ
@@ -156,53 +155,64 @@
     }
 
     // ============================================================
-    // КОМПОНЕНТЫ
+    // КОМПОНЕНТЫ (на jQuery + правильная навигация)
     // ============================================================
     if (typeof Lampa !== 'undefined' && Lampa.Component) {
+
+        // ---------- СПИСОК СЕРВЕРОВ ----------
         Lampa.Component.add('dlna_servers', {
             create() {
-                this.el = document.createElement('div');
-                this.el.className = 'dlna-servers';
-                this.el.innerHTML = '<div class="dlna-servers__list"></div>';
-                return this.el;
+                this.el = $('<div class="dlna-servers"><div class="dlna-servers__list"></div></div>');
+                return this.el[0];
             },
-            start() { this.render(); },
+            start() {
+                this.render();
+                // Регистрируем коллекцию для навигации пультом
+                setTimeout(() => {
+                    Lampa.Controller.collectionSet(this.el);
+                    Lampa.Controller.collectionFocus(false, this.el);
+                }, 50);
+            },
             render() {
-                const list = this.el.querySelector('.dlna-servers__list');
-                if (!list) return;
-                list.innerHTML = '';
+                const $list = this.el.find('.dlna-servers__list');
+                $list.empty();
                 const servers = DLNAServers.get();
                 const lastId = Lampa.Storage.get('dlna_last_server', '');
 
                 servers.forEach(srv => {
-                    const item = document.createElement('div');
-                    item.className = 'dlna-item selector';
-                    item.innerHTML = `
-                        <div class="dlna-item__title">
-                            <span class="dlna-status dlna-status--checking" data-status-id="${srv.id}"></span>
-                            ${srv.name}${srv.id === lastId ? ' <span style="opacity:.5;font-size:.8em">• последний</span>' : ''}
+                    const $item = $(`
+                        <div class="dlna-item selector">
+                            <div class="dlna-item__title">
+                                <span class="dlna-status dlna-status--checking" data-status-id="${srv.id}"></span>
+                                ${srv.name}${srv.id === lastId ? ' <span style="opacity:.5;font-size:.8em">• последний</span>' : ''}
+                            </div>
+                            <div class="dlna-item__sub">${srv.ip}:${srv.port}</div>
                         </div>
-                        <div class="dlna-item__sub">${srv.ip}:${srv.port}</div>`;
-                    item.addEventListener('hover:enter', () => this.openMenu(srv));
-                    list.appendChild(item);
+                    `);
+                    $item.on('hover:enter', () => this.openMenu(srv));
+                    $list.append($item);
                     checkServerStatus(srv).then(status => {
-                        const dot = item.querySelector(`[data-status-id="${srv.id}"]`);
-                        if (dot) dot.className = `dlna-status dlna-status--${status}`;
+                        $item.find(`[data-status-id="${srv.id}"]`).attr('class', `dlna-status dlna-status--${status}`);
                     });
                 });
 
-                const addBtn = document.createElement('div');
-                addBtn.className = 'dlna-item dlna-item--action selector';
-                addBtn.innerHTML = '<div class="dlna-item__title">➕ Добавить сервер</div>';
-                addBtn.addEventListener('hover:enter', () => this.addFlow());
-                list.appendChild(addBtn);
+                const $addBtn = $(`
+                    <div class="dlna-item dlna-item--action selector">
+                        <div class="dlna-item__title">➕ Добавить сервер</div>
+                    </div>
+                `);
+                $addBtn.on('hover:enter', () => this.addFlow());
+                $list.append($addBtn);
 
                 if (servers.length === 0) {
-                    const hint = document.createElement('div');
-                    hint.className = 'dlna-hint';
-                    hint.textContent = 'Серверов пока нет. Нажмите «Добавить сервер».';
-                    list.insertBefore(hint, addBtn);
+                    $list.prepend('<div class="dlna-hint">Серверов пока нет. Нажмите «Добавить сервер».</div>');
                 }
+
+                // Перерегистрируем коллекцию после рендера
+                setTimeout(() => {
+                    Lampa.Controller.collectionSet(this.el);
+                    Lampa.Controller.collectionFocus(false, this.el);
+                }, 50);
             },
             openMenu(srv) {
                 Lampa.Select.show({
@@ -290,12 +300,11 @@
             stop() {}, destroy() {}
         });
 
+        // ---------- БРАУЗЕР ----------
         Lampa.Component.add('dlna_browser', {
             create() {
-                this.el = document.createElement('div');
-                this.el.className = 'dlna-browser';
-                this.el.innerHTML = '<div class="dlna-browser__list"></div>';
-                return this.el;
+                this.el = $('<div class="dlna-browser"><div class="dlna-browser__list"></div></div>');
+                return this.el[0];
             },
             start() {
                 this.server = this.activity.server;
@@ -305,13 +314,13 @@
                 this.load();
             },
             async load() {
-                const list = this.el.querySelector('.dlna-browser__list');
-                list.innerHTML = '<div class="dlna-loading">Загрузка…</div>';
+                const $list = this.el.find('.dlna-browser__list');
+                $list.html('<div class="dlna-loading">Загрузка…</div>');
                 try {
                     if (!this.server.controlURL || Date.now() - (this.server.controlURLTime || 0) > 3600000) {
                         const probe = await probeServer(this.server.ip, this.server.port);
                         if (this._destroyed) return;
-                        if (!probe) { list.innerHTML = '<div>Сервер недоступен.</div>'; return; }
+                        if (!probe) { $list.html('<div>Сервер недоступен.</div>'); return; }
                         const base = `http://${this.server.ip}:${this.server.port}${probe.path}`;
                         const ctrl = extractControlURL(probe.doc, base);
                         DLNAServers.update(this.server.id, { controlURL: ctrl, controlURLTime: Date.now() });
@@ -319,30 +328,36 @@
                     }
                     const items = await browseDirectory(this.server.controlURL, this.objectId);
                     if (this._destroyed) return;
-                    if (items.length === 0) { list.innerHTML = '<div>Папка пуста</div>'; return; }
-                    this.renderItems(sortItems(items, this.sortMode), list);
+                    if (items.length === 0) { $list.html('<div>Папка пуста</div>'); return; }
+                    this.renderItems(sortItems(items, this.sortMode), $list);
                 } catch (err) {
                     if (this._destroyed) return;
                     console.error('DLNA browse error:', err);
-                    list.innerHTML = '<div>Не удалось загрузить содержимое</div>';
+                    $list.html('<div>Не удалось загрузить содержимое</div>');
                     Lampa.Noty.show('Ошибка загрузки DLNA', { style: 'error', time: 5000 });
                 }
             },
-            renderItems(items, list) {
-                list.innerHTML = '';
-                const sortBtn = document.createElement('div');
-                sortBtn.className = 'dlna-item dlna-item--action selector';
-                sortBtn.innerHTML = `<div class="dlna-item__title">⇅ Сортировка: ${this.sortMode === 'name' ? 'по имени' : 'папки первыми'}</div>`;
-                sortBtn.addEventListener('hover:enter', () => this.openSortMenu());
-                list.appendChild(sortBtn);
+            renderItems(items, $list) {
+                $list.empty();
+
+                const $sortBtn = $(`
+                    <div class="dlna-item dlna-item--action selector">
+                        <div class="dlna-item__title">⇅ Сортировка: ${this.sortMode === 'name' ? 'по имени' : 'папки первыми'}</div>
+                    </div>
+                `);
+                $sortBtn.on('hover:enter', () => this.openSortMenu());
+                $list.append($sortBtn);
 
                 items.forEach(item => {
-                    const el = document.createElement('div');
-                    el.className = 'dlna-item selector';
-                    el.innerHTML = `<div class="dlna-item__title">${item.title}</div>`;
-                    el.addEventListener('hover:enter', () => this.onItem(item));
-                    list.appendChild(el);
+                    const $el = $(`<div class="dlna-item selector"><div class="dlna-item__title">${item.title}</div></div>`);
+                    $el.on('hover:enter', () => this.onItem(item));
+                    $list.append($el);
                 });
+
+                setTimeout(() => {
+                    Lampa.Controller.collectionSet(this.el);
+                    Lampa.Controller.collectionFocus(false, this.el);
+                }, 50);
             },
             onItem(item) {
                 if (item.type === 'folder') {
@@ -377,26 +392,20 @@
     }
 
     // ============================================================
-    // ОТКРЫТИЕ ЭКРАНА СПИСКА СЕРВЕРОВ (с закрытием настроек)
+    // ОТКРЫТИЕ ЭКРАНА СПИСКА
     // ============================================================
     function openServersScreen() {
-        console.log('DLNA: openServersScreen called');
-        // Пытаемся закрыть настройки, чтобы Activity.push не блокировался
         try {
             if (typeof Lampa.Settings !== 'undefined' && typeof Lampa.Settings.close === 'function') {
                 Lampa.Settings.close();
             } else if (typeof Lampa.Activity !== 'undefined') {
                 Lampa.Activity.backward();
             }
-        } catch (e) {
-            console.warn('DLNA: settings close error', e);
-        }
+        } catch (e) { /* ignore */ }
 
-        // Небольшая задержка, чтобы закрытие успело произойти
         setTimeout(() => {
             try {
                 Lampa.Activity.push({ component: 'dlna_servers', title: 'DLNA серверы' });
-                console.log('DLNA: Activity.push OK');
             } catch (e) {
                 console.error('DLNA: Activity.push error', e);
                 Lampa.Noty.show('Не удалось открыть экран DLNA', { style: 'error' });
@@ -405,21 +414,17 @@
     }
 
     // ============================================================
-    // КНОПКА В ВЕРХНЕЙ ПАНЕЛИ (альтернативная точка входа)
+    // КНОПКА В ВЕРХНЕЙ ПАНЕЛИ
     // ============================================================
     function addHeaderButton() {
-        // Пробуем несколько возможных контейнеров для верхней панели
         const selectors = ['.head__actions', '.header__actions', '.top__actions', '.head .actions'];
         let container = null;
         for (const sel of selectors) {
             const el = document.querySelector(sel);
             if (el) { container = el; break; }
         }
-        if (!container) {
-            console.log('DLNA: header container not found yet');
-            return false;
-        }
-        if (container.querySelector('.head__action--dlna')) return true; // уже есть
+        if (!container) return false;
+        if (container.querySelector('.head__action--dlna')) return true;
 
         const btn = document.createElement('div');
         btn.className = 'head__action head__action--dlna selector';
@@ -427,7 +432,6 @@
         btn.addEventListener('click', openServersScreen);
         btn.addEventListener('hover:enter', openServersScreen);
         container.appendChild(btn);
-        console.log('DLNA: header button added');
         return true;
     }
 
@@ -448,10 +452,8 @@
             Lampa.SettingsApi.addParam({
                 component: 'dlna_plugin',
                 param: { name: 'dlna_enabled', type: 'trigger', default: true },
-                field: { name: 'Включить DLNA', description: 'Активировать плагин' }
+                field: { name: 'Включить DLNA' }
             });
-
-            // Кнопка управления серверами — используем type 'button'
             Lampa.SettingsApi.addParam({
                 component: 'dlna_plugin',
                 param: { name: 'dlna_manage_btn', type: 'button', default: '' },
@@ -460,14 +462,10 @@
             });
         } catch (e) { console.error('DLNA: settings error', e); }
 
-        // Добавляем кнопку в верхнюю панель (несколько попыток)
-        let headerAttempts = 0;
+        let n = 0;
         const tryHeader = () => {
             if (addHeaderButton()) return;
-            if (++headerAttempts > 20) {
-                console.warn('DLNA: header button could not be added after 20 attempts');
-                return;
-            }
+            if (++n > 20) return;
             setTimeout(tryHeader, 1000);
         };
         tryHeader();
