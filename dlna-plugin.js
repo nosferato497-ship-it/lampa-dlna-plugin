@@ -1,13 +1,13 @@
 /**
  * DLNA Plugin for Lampa
- * Version: 2.2.0 — uses Lampa.Request (Android Native Bridge) to bypass CORS
+ * Version: 2.3.0 — forced native HTTP requests to bypass WebView CORS
  */
 (function () {
     'use strict';
     if (window.dlna_plugin_ready) return;
     window.dlna_plugin_ready = true;
 
-    const VERSION = '2.2.0';
+    const VERSION = '2.3.0';
 
     function noty(text, style, time) {
         try {
@@ -18,7 +18,6 @@
         } catch (e) { console.log('DLNA noty:', text); }
     }
 
-    // Хранилище (без изменений)
     const DLNAServers = {
         get()      { try { return Lampa.Storage.get('dlna_servers', []); } catch (e) { return []; } },
         save(list) { try { Lampa.Storage.set('dlna_servers', list); } catch (e) {} },
@@ -38,32 +37,27 @@
     };
 
     // ============================================================
-    // НОВАЯ ФУНКЦИЯ: ЗАПРОС ЧЕРЕЗ Lampa.Request (обход CORS)
+    // КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: ЗАПРОС ЧЕРЕЗ НАТИВНЫЙ МОСТ
     // ============================================================
-    function request(url, options) {
+    function nativeRequest(url, options) {
         return new Promise((resolve, reject) => {
             try {
-                // Lampa.Request.get — это обертка, которая на Android использует нативный мост
-                Lampa.Request.get(url, (data) => {
-                    // Успешный ответ
+                // Принудительно используем нативный режим Lampa
+                Lampa.Request.native(url, (data) => {
                     resolve({
                         ok: true,
                         text: () => Promise.resolve(typeof data === 'string' ? data : JSON.stringify(data)),
                         json: () => Promise.resolve(data)
                     });
                 }, (error) => {
-                    // Ошибка
-                    reject(new Error(error || 'Request failed'));
-                }, options); // options может содержать method, body, headers
+                    reject(new Error(error || 'Native request failed'));
+                }, options);
             } catch (e) {
                 reject(e);
             }
         });
     }
 
-    // ============================================================
-    // ПРОБИНГ СЕРВЕРА (через Lampa.Request)
-    // ============================================================
     const PATHS_TO_TRY = [
         '/rootDesc.xml', '/description.xml', '/',
         '/DeviceDescription.xml', '/upnp/rootDesc.xml', '/root.xml'
@@ -73,15 +67,13 @@
         for (const path of PATHS_TO_TRY) {
             const url = `http://${ip}:${port}${path}`;
             try {
-                const resp = await request(url);
+                const resp = await nativeRequest(url);
                 const text = await resp.text();
                 const doc = new DOMParser().parseFromString(text, 'text/xml');
                 if (doc.querySelector('device') || doc.querySelector('serviceList')) {
                     return { path, xml: text, doc };
                 }
-            } catch (e) {
-                // Пробуем следующий путь
-            }
+            } catch (e) { /* next */ }
         }
         return null;
     }
@@ -99,9 +91,6 @@
         return null;
     }
 
-    // ============================================================
-    // BROWSE (через Lampa.Request)
-    // ============================================================
     async function browseDirectory(controlURL, objectId) {
         objectId = objectId || '0';
         const soapBody = `<?xml version="1.0" encoding="utf-8"?>
@@ -111,7 +100,8 @@
 <Filter>*</Filter><StartingIndex>0</StartingIndex><RequestedCount>0</RequestedCount>
 <SortCriteria></SortCriteria></u:Browse></s:Body></s:Envelope>`;
 
-        const resp = await request(controlURL, {
+        // Для SOAP-запроса используем нативный мост с методом POST
+        const resp = await nativeRequest(controlURL, {
             method: 'POST',
             headers: {
                 'Content-Type': 'text/xml; charset="utf-8"',
@@ -180,7 +170,7 @@
     }
 
     // ============================================================
-    // ОСТАЛЬНОЙ UI-КОД (без изменений, кроме вызовов)
+    // UI (без изменений)
     // ============================================================
     function showServersList() {
         try {
