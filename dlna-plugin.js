@@ -1,23 +1,28 @@
 /**
  * DLNA Plugin for Lampa
- * Version: 2.0.0 — native Lampa dialogs (Select/Input/Noty)
- * Target: Android TV (Xiaomi Mi Box S 4K)
+ * Version: 2.1.0 — defensive, no Lampa.Settings.close, no AbortSignal.timeout
  */
 (function () {
     'use strict';
-
     if (window.dlna_plugin_ready) return;
     window.dlna_plugin_ready = true;
 
-    const VERSION = '2.0.0';
+    const VERSION = '2.1.0';
 
-    // ============================================================
-    // ХРАНИЛИЩЕ СЕРВЕРОВ
-    // ============================================================
+    function noty(text, style, time) {
+        try {
+            const opts = {};
+            if (style) opts.style = style;
+            if (time) opts.time = time;
+            Lampa.Noty.show(text, opts);
+        } catch (e) { console.log('DLNA noty:', text); }
+    }
+
+    // Хранилище
     const DLNAServers = {
-        get()      { return Lampa.Storage.get('dlna_servers', []); },
-        save(list) { Lampa.Storage.set('dlna_servers', list); },
-        add(s)     {
+        get()      { try { return Lampa.Storage.get('dlna_servers', []); } catch (e) { return []; } },
+        save(list) { try { Lampa.Storage.set('dlna_servers', list); } catch (e) {} },
+        add(s) {
             const list = this.get();
             s.id = s.id || 'srv_' + Date.now();
             list.push(s);
@@ -32,9 +37,19 @@
         remove(id) { this.save(this.get().filter(s => s.id !== id)); }
     };
 
-    // ============================================================
-    // СЕТЬ
-    // ============================================================
+    // Сеть: fetch с таймаутом через Promise.race (без AbortSignal.timeout)
+    function fetchTimeout(url, opts, ms) {
+        opts = opts || {};
+        ms = ms || 3000;
+        return new Promise((resolve, reject) => {
+            const timer = setTimeout(() => reject(new Error('timeout')), ms);
+            fetch(url, opts).then(
+                (r) => { clearTimeout(timer); resolve(r); },
+                (e) => { clearTimeout(timer); reject(e); }
+            );
+        });
+    }
+
     const PATHS_TO_TRY = [
         '/rootDesc.xml', '/description.xml', '/',
         '/DeviceDescription.xml', '/upnp/rootDesc.xml', '/root.xml'
@@ -44,7 +59,7 @@
         for (const path of PATHS_TO_TRY) {
             try {
                 const url = `http://${ip}:${port}${path}`;
-                const resp = await fetch(url, { signal: AbortSignal.timeout(3000) });
+                const resp = await fetchTimeout(url, {}, 3000);
                 if (!resp.ok) continue;
                 const text = await resp.text();
                 const doc = new DOMParser().parseFromString(text, 'text/xml');
@@ -57,59 +72,65 @@
     }
 
     function extractControlURL(descDoc, baseURL) {
-        for (const s of descDoc.getElementsByTagName('service')) {
-            const type = s.getElementsByTagName('serviceType')[0]?.textContent || '';
-            if (type.includes('ContentDirectory')) {
-                const ctrl = s.getElementsByTagName('controlURL')[0]?.textContent;
-                if (ctrl) return new URL(ctrl, baseURL).href;
+        try {
+            for (const s of descDoc.getElementsByTagName('service')) {
+                const type = s.getElementsByTagName('serviceType')[0]?.textContent || '';
+                if (type.includes('ContentDirectory')) {
+                    const ctrl = s.getElementsByTagName('controlURL')[0]?.textContent;
+                    if (ctrl) return new URL(ctrl, baseURL).href;
+                }
             }
-        }
+        } catch (e) { console.error('extractControlURL error', e); }
         return null;
     }
 
-    async function browseDirectory(controlURL, objectId = '0') {
+    async function browseDirectory(controlURL, objectId) {
+        objectId = objectId || '0';
         const soapBody = `<?xml version="1.0" encoding="utf-8"?>
 <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
 <s:Body><u:Browse xmlns:u="urn:schemas-upnp-org:service:ContentDirectory:1">
 <ObjectID>${objectId}</ObjectID><BrowseFlag>BrowseDirectChildren</BrowseFlag>
 <Filter>*</Filter><StartingIndex>0</StartingIndex><RequestedCount>0</RequestedCount>
 <SortCriteria></SortCriteria></u:Browse></s:Body></s:Envelope>`;
-        const resp = await fetch(controlURL, {
+        const resp = await fetchTimeout(controlURL, {
             method: 'POST',
             headers: {
                 'Content-Type': 'text/xml; charset="utf-8"',
                 'SOAPAction': '"urn:schemas-upnp-org:service:ContentDirectory:1#Browse"'
             },
             body: soapBody
-        });
+        }, 8000);
         if (!resp.ok) throw new Error('Browse failed: ' + resp.status);
-        return parseBrowseResponse(await resp.text());
+        const text = await resp.text();
+        return parseBrowseResponse(text);
     }
 
     function parseBrowseResponse(xmlText) {
-        const parser = new DOMParser();
-        const xmlDoc = parser.parseFromString(xmlText, 'text/xml');
-        const resultElement = xmlDoc.getElementsByTagName('Result')[0];
-        if (!resultElement) return [];
-        const didlDoc = parser.parseFromString(resultElement.textContent, 'text/xml');
-        const items = [];
-        for (const c of didlDoc.getElementsByTagName('container')) {
-            items.push({ type: 'folder', id: c.getAttribute('id'), title: getText(c, 'dc:title') || 'Без названия' });
-        }
-        for (const it of didlDoc.getElementsByTagName('item')) {
-            const res = it.getElementsByTagName('res')[0];
-            const url = res?.textContent;
-            const pi = res?.getAttribute('protocolInfo') || '';
-            if (!url || !pi.includes('video')) continue;
-            items.push({
-                type: 'video',
-                title: getText(it, 'dc:title') || 'Без названия',
-                url,
-                poster: getText(it, 'upnp:albumArtURI'),
-                description: getText(it, 'dc:description')
-            });
-        }
-        return items;
+        try {
+            const parser = new DOMParser();
+            const xmlDoc = parser.parseFromString(xmlText, 'text/xml');
+            const resultElement = xmlDoc.getElementsByTagName('Result')[0];
+            if (!resultElement) return [];
+            const didlDoc = parser.parseFromString(resultElement.textContent, 'text/xml');
+            const items = [];
+            for (const c of didlDoc.getElementsByTagName('container')) {
+                items.push({ type: 'folder', id: c.getAttribute('id'), title: getText(c, 'dc:title') || 'Без названия' });
+            }
+            for (const it of didlDoc.getElementsByTagName('item')) {
+                const res = it.getElementsByTagName('res')[0];
+                const url = res?.textContent;
+                const pi = res?.getAttribute('protocolInfo') || '';
+                if (!url || !pi.includes('video')) continue;
+                items.push({
+                    type: 'video',
+                    title: getText(it, 'dc:title') || 'Без названия',
+                    url,
+                    poster: getText(it, 'upnp:albumArtURI'),
+                    description: getText(it, 'dc:description')
+                });
+            }
+            return items;
+        } catch (e) { console.error('parseBrowseResponse error', e); return []; }
     }
 
     function getText(node, tag) {
@@ -140,74 +161,93 @@
     }
 
     // ============================================================
-    // UI: СПИСОК СЕРВЕРОВ
+    // СПИСОК СЕРВЕРОВ
     // ============================================================
     function showServersList() {
-        const servers = DLNAServers.get();
-        const items = [];
-
-        servers.forEach(srv => {
-            items.push({
+        try {
+            const servers = DLNAServers.get();
+            const items = servers.map(srv => ({
                 title: '📺 ' + srv.name,
                 subtitle: srv.ip + ':' + srv.port,
-                _action: () => openServerMenu(srv)
+                _srv: srv
+            }));
+            items.push({ title: '➕ Добавить сервер', _add: true });
+
+            Lampa.Select.show({
+                title: 'DLNA Серверы',
+                items: items,
+                onSelect: (item) => {
+                    try { Lampa.Select.close(); } catch (e) {}
+                    setTimeout(() => {
+                        if (item._add) addServerFlow();
+                        else if (item._srv) openServerMenu(item._srv);
+                    }, 150);
+                },
+                onBack: () => { try { Lampa.Controller.toggle('content'); } catch (e) {} }
             });
-        });
-
-        items.push({
-            title: '➕ Добавить сервер',
-            subtitle: 'Ввести IP и порт вручную',
-            _action: addServerFlow
-        });
-
-        Lampa.Select.show({
-            title: 'DLNA Серверы',
-            items: items,
-            onSelect: (item) => {
-                Lampa.Select.close();
-                setTimeout(() => { if (item._action) item._action(); }, 200);
-            },
-            onBack: () => Lampa.Controller.toggle('content')
-        });
+        } catch (e) {
+            console.error('showServersList error', e);
+            noty('Ошибка: ' + e.message, 'error', 5000);
+        }
     }
 
     // ============================================================
-    // UI: МЕНЮ СЕРВЕРА
+    // МЕНЮ СЕРВЕРА
     // ============================================================
     function openServerMenu(srv) {
-        Lampa.Select.show({
-            title: srv.name,
-            items: [
-                { title: '▶ Открыть', _action: () => openServerRoot(srv) },
-                { title: '✎ Изменить', _action: () => editServerFlow(srv) },
-                { title: '🗑 Удалить', _action: () => confirmDelete(srv) },
-                { title: '⬅ Назад', _action: showServersList }
-            ],
-            onSelect: (item) => {
-                Lampa.Select.close();
-                setTimeout(() => { if (item._action) item._action(); }, 200);
-            },
-            onBack: () => Lampa.Controller.toggle('content')
-        });
+        try {
+            Lampa.Select.show({
+                title: srv.name,
+                items: [
+                    { title: '▶ Открыть', _action: 'open' },
+                    { title: '✎ Изменить', _action: 'edit' },
+                    { title: '🗑 Удалить', _action: 'delete' },
+                    { title: '⬅ Назад', _action: 'back' }
+                ],
+                onSelect: (item) => {
+                    try { Lampa.Select.close(); } catch (e) {}
+                    setTimeout(() => {
+                        if (item._action === 'open') openServerRoot(srv);
+                        else if (item._action === 'edit') editServerFlow(srv);
+                        else if (item._action === 'delete') confirmDelete(srv);
+                        else showServersList();
+                    }, 150);
+                },
+                onBack: () => { try { Lampa.Controller.toggle('content'); } catch (e) {} }
+            });
+        } catch (e) {
+            console.error('openServerMenu error', e);
+            noty('Ошибка: ' + e.message, 'error', 5000);
+        }
     }
 
     function confirmDelete(srv) {
-        Lampa.Select.show({
-            title: 'Удалить "' + srv.name + '"?',
-            items: [
-                { title: 'Да, удалить', _action: () => { DLNAServers.remove(srv.id); Lampa.Noty.show('Удалено'); showServersList(); } },
-                { title: 'Отмена', _action: () => openServerMenu(srv) }
-            ],
-            onSelect: (item) => {
-                Lampa.Select.close();
-                setTimeout(() => { if (item._action) item._action(); }, 200);
-            },
-            onBack: () => Lampa.Controller.toggle('content')
-        });
+        try {
+            Lampa.Select.show({
+                title: 'Удалить "' + srv.name + '"?',
+                items: [
+                    { title: 'Да, удалить', _action: 'yes' },
+                    { title: 'Отмена', _action: 'no' }
+                ],
+                onSelect: (item) => {
+                    try { Lampa.Select.close(); } catch (e) {}
+                    setTimeout(() => {
+                        if (item._action === 'yes') {
+                            DLNAServers.remove(srv.id);
+                            noty('Удалено');
+                            showServersList();
+                        } else {
+                            openServerMenu(srv);
+                        }
+                    }, 150);
+                },
+                onBack: () => { try { Lampa.Controller.toggle('content'); } catch (e) {} }
+            });
+        } catch (e) { console.error('confirmDelete error', e); }
     }
 
     // ============================================================
-    // UI: ДОБАВЛЕНИЕ СЕРВЕРА
+    // ДОБАВЛЕНИЕ СЕРВЕРА
     // ============================================================
     const PRESETS = [
         { name: 'MiniDLNA', port: '8200' },
@@ -218,182 +258,224 @@
     ];
 
     function addServerFlow() {
-        const items = PRESETS.map(p => ({
-            title: p.name,
-            subtitle: 'порт ' + p.port,
-            _action: () => promptIP(p)
-        }));
-        items.push({ title: '⬅ Назад', _action: showServersList });
-        Lampa.Select.show({
-            title: 'Тип сервера',
-            items: items,
-            onSelect: (item) => {
-                Lampa.Select.close();
-                setTimeout(() => { if (item._action) item._action(); }, 200);
-            },
-            onBack: () => Lampa.Controller.toggle('content')
-        });
+        try {
+            const items = PRESETS.map((p, i) => ({
+                title: p.name,
+                subtitle: 'порт ' + p.port,
+                _i: i
+            }));
+            items.push({ title: '⬅ Назад', _back: true });
+
+            Lampa.Select.show({
+                title: 'Тип сервера',
+                items: items,
+                onSelect: (item) => {
+                    try { Lampa.Select.close(); } catch (e) {}
+                    setTimeout(() => {
+                        if (item._back) showServersList();
+                        else promptIP(PRESETS[item._i]);
+                    }, 150);
+                },
+                onBack: () => { try { Lampa.Controller.toggle('content'); } catch (e) {} }
+            });
+        } catch (e) {
+            console.error('addServerFlow error', e);
+            noty('Ошибка: ' + e.message, 'error', 5000);
+        }
     }
 
     function promptIP(preset) {
-        Lampa.Input.edit({
-            title: 'IP-адрес',
-            value: Lampa.Storage.get('dlna_last_ip', '192.168.1.'),
-            free: true
-        }, (ip) => {
-            if (!ip) return;
-            Lampa.Storage.set('dlna_last_ip', ip);
-            promptPort(preset, ip);
-        });
+        try {
+            Lampa.Input.edit({
+                title: 'IP-адрес',
+                value: Lampa.Storage.get('dlna_last_ip', '192.168.1.'),
+                free: true
+            }, (ip) => {
+                if (!ip) return;
+                Lampa.Storage.set('dlna_last_ip', ip);
+                promptPort(preset, ip);
+            });
+        } catch (e) { console.error('promptIP error', e); noty('Ошибка ввода IP', 'error'); }
     }
 
     function promptPort(preset, ip) {
-        Lampa.Input.edit({
-            title: 'Порт',
-            value: preset.port,
-            free: true
-        }, (port) => {
-            if (!port) return;
-            promptName(preset, ip, port);
-        });
-    }
-
-    function promptName(preset, ip, port) {
-        Lampa.Input.edit({
-            title: 'Название',
-            value: preset.name,
-            free: true
-        }, (name) => {
-            if (!name) return;
-            saveServer({ name, ip, port });
-        });
-    }
-
-    async function saveServer(data) {
-        Lampa.Noty.show('Проверка подключения…');
-        const probe = await probeServer(data.ip, data.port);
-        if (!probe) {
-            Lampa.Noty.show('Сервер не отвечает. Проверьте IP и порт.', { style: 'error', time: 5000 });
-            showServersList();
-            return;
-        }
-        const base = `http://${data.ip}:${data.port}${probe.path}`;
-        const controlURL = extractControlURL(probe.doc, base);
-        if (!controlURL) {
-            Lampa.Noty.show('ContentDirectory не найден на сервере.', { style: 'error', time: 5000 });
-            showServersList();
-            return;
-        }
-        DLNAServers.add(Object.assign({}, data, {
-            path: probe.path, controlURL, controlURLTime: Date.now()
-        }));
-        Lampa.Noty.show('Готово: ' + data.name);
-        showServersList();
-    }
-
-    function editServerFlow(srv) {
-        Lampa.Input.edit({
-            title: 'IP-адрес',
-            value: srv.ip,
-            free: true
-        }, (ip) => {
-            if (!ip) return;
+        try {
             Lampa.Input.edit({
                 title: 'Порт',
-                value: srv.port,
+                value: preset.port,
                 free: true
             }, (port) => {
                 if (!port) return;
-                Lampa.Input.edit({
-                    title: 'Название',
-                    value: srv.name,
-                    free: true
-                }, (name) => {
-                    if (!name) return;
-                    DLNAServers.update(srv.id, { ip, port, name, controlURL: null, controlURLTime: 0 });
-                    Lampa.Noty.show('Обновлено');
-                    showServersList();
-                });
+                promptName(preset, ip, port);
             });
-        });
+        } catch (e) { console.error('promptPort error', e); noty('Ошибка ввода порта', 'error'); }
     }
 
-    // ============================================================
-    // UI: НАВИГАЦИЯ ПО ПАПКАМ
-    // ============================================================
-    async function openServerRoot(srv) {
-        await browseFolder(srv, '0', 'Корень: ' + srv.name);
-    }
-
-    async function browseFolder(srv, objectId, folderTitle) {
-        const ctrl = await ensureControlURL(srv);
-        if (!ctrl) {
-            Lampa.Noty.show('Сервер недоступен', { style: 'error', time: 5000 });
-            showServersList();
-            return;
-        }
-
-        let items;
+    function promptName(preset, ip, port) {
         try {
-            Lampa.Noty.show('Загрузка…');
-            items = await browseDirectory(ctrl, objectId);
-        } catch (e) {
-            console.error('browseFolder error', e);
-            Lampa.Noty.show('Ошибка загрузки', { style: 'error', time: 5000 });
-            return;
-        }
-
-        if (items.length === 0) {
-            Lampa.Noty.show('Папка пуста');
-            return;
-        }
-
-        const sorted = sortItems(items, 'type');
-        const menuItems = [];
-
-        if (objectId !== '0') {
-            menuItems.push({
-                title: '⬅ Назад',
-                subtitle: 'в родительский каталог',
-                _action: () => Lampa.Activity.backward()
+            Lampa.Input.edit({
+                title: 'Название',
+                value: preset.name,
+                free: true
+            }, (name) => {
+                if (!name) return;
+                saveServer({ name, ip, port });
             });
-        }
+        } catch (e) { console.error('promptName error', e); noty('Ошибка ввода названия', 'error'); }
+    }
 
-        sorted.forEach(it => {
-            if (it.type === 'folder') {
-                menuItems.push({
-                    title: '📁 ' + it.title,
-                    _action: () => {
-                        Lampa.Activity.push({
-                            component: 'dlna_folder_stub',
-                            title: it.title,
-                            _srv: srv,
-                            _objectId: it.id
-                        });
-                    }
-                });
-            } else if (it.type === 'video') {
-                menuItems.push({
-                    title: '🎬 ' + it.title,
-                    subtitle: it.description || '',
-                    _action: () => playVideo(it)
-                });
+    async function saveServer(data) {
+        try {
+            noty('Проверка подключения…');
+            const probe = await probeServer(data.ip, data.port);
+            if (!probe) {
+                noty('Сервер не отвечает. Проверьте IP и порт.', 'error', 5000);
+                showServersList();
+                return;
             }
-        });
-
-        if (objectId === '0') {
-            menuItems.push({ title: '⬅ Назад к серверам', _action: showServersList });
+            const base = `http://${data.ip}:${data.port}${probe.path}`;
+            const controlURL = extractControlURL(probe.doc, base);
+            if (!controlURL) {
+                noty('ContentDirectory не найден на сервере.', 'error', 5000);
+                showServersList();
+                return;
+            }
+            DLNAServers.add(Object.assign({}, data, {
+                path: probe.path, controlURL, controlURLTime: Date.now()
+            }));
+            noty('Готово: ' + data.name);
+            showServersList();
+        } catch (e) {
+            console.error('saveServer error', e);
+            noty('Ошибка: ' + e.message, 'error', 5000);
         }
+    }
 
-        Lampa.Select.show({
-            title: folderTitle,
-            items: menuItems,
-            onSelect: (item) => {
-                Lampa.Select.close();
-                setTimeout(() => { if (item._action) item._action(); }, 200);
-            },
-            onBack: () => Lampa.Controller.toggle('content')
-        });
+    function editServerFlow(srv) {
+        try {
+            Lampa.Input.edit({
+                title: 'IP-адрес',
+                value: srv.ip,
+                free: true
+            }, (ip) => {
+                if (!ip) return;
+                Lampa.Input.edit({
+                    title: 'Порт',
+                    value: srv.port,
+                    free: true
+                }, (port) => {
+                    if (!port) return;
+                    Lampa.Input.edit({
+                        title: 'Название',
+                        value: srv.name,
+                        free: true
+                    }, (name) => {
+                        if (!name) return;
+                        DLNAServers.update(srv.id, { ip, port, name, controlURL: null, controlURLTime: 0 });
+                        noty('Обновлено');
+                        showServersList();
+                    });
+                });
+            });
+        } catch (e) { console.error('editServerFlow error', e); }
+    }
+
+    // ============================================================
+    // НАВИГАЦИЯ ПО ПАПКАМ (Select-only, с ручным стеком)
+    // ============================================================
+    let navStack = [];
+
+    async function openServerRoot(srv) {
+        navStack = [{ srv: srv, objectId: '0', title: 'Корень: ' + srv.name }];
+        await showFolder(0);
+    }
+
+    async function showFolder(index) {
+        try {
+            const cur = navStack[index];
+            const srv = cur.srv;
+            const ctrl = await ensureControlURL(srv);
+            if (!ctrl) {
+                noty('Сервер недоступен', 'error', 5000);
+                showServersList();
+                return;
+            }
+
+            noty('Загрузка…');
+            let items;
+            try {
+                items = await browseDirectory(ctrl, cur.objectId);
+            } catch (e) {
+                console.error('browse error', e);
+                noty('Ошибка загрузки: ' + e.message, 'error', 5000);
+                return;
+            }
+
+            if (items.length === 0) {
+                noty('Папка пуста');
+                return;
+            }
+
+            const sorted = sortItems(items, 'type');
+            const menuItems = [];
+
+            if (index > 0) {
+                menuItems.push({ title: '⬅ Назад', _back: true });
+            }
+
+            sorted.forEach(it => {
+                if (it.type === 'folder') {
+                    menuItems.push({ title: '📁 ' + it.title, _folder: it });
+                } else if (it.type === 'video') {
+                    menuItems.push({ title: '🎬 ' + it.title, subtitle: it.description || '', _video: it });
+                }
+            });
+
+            if (index === 0) {
+                menuItems.push({ title: '⬅ Выход', _exit: true });
+            }
+
+            Lampa.Select.show({
+                title: cur.title,
+                items: menuItems,
+                onSelect: (item) => {
+                    try { Lampa.Select.close(); } catch (e) {}
+                    setTimeout(() => {
+                        try {
+                            if (item._back) {
+                                navStack.pop();
+                                showFolder(navStack.length - 1);
+                            } else if (item._exit) {
+                                showServersList();
+                            } else if (item._folder) {
+                                navStack.push({ srv: srv, objectId: item._folder.id, title: item._folder.title });
+                                showFolder(navStack.length - 1);
+                            } else if (item._video) {
+                                playVideo(item._video);
+                            }
+                        } catch (e) {
+                            console.error('nav error', e);
+                            noty('Ошибка навигации', 'error');
+                        }
+                    }, 150);
+                },
+                onBack: () => {
+                    try {
+                        if (navStack.length > 1) {
+                            navStack.pop();
+                            setTimeout(() => showFolder(navStack.length - 1), 100);
+                        } else {
+                            Lampa.Controller.toggle('content');
+                        }
+                    } catch (e) {
+                        console.error('onBack error', e);
+                    }
+                }
+            });
+        } catch (e) {
+            console.error('showFolder error', e);
+            noty('Ошибка: ' + e.message, 'error', 5000);
+        }
     }
 
     function playVideo(item) {
@@ -409,55 +491,44 @@
             });
         } catch (e) {
             console.error('play error', e);
-            Lampa.Noty.show('Не удалось запустить видео', { style: 'error' });
+            noty('Не удалось запустить видео', 'error', 5000);
         }
-    }
-
-    // ============================================================
-    // ЗАГЛУШКА-КОМПОНЕНТ для стека «назад»
-    // ============================================================
-    if (typeof Lampa !== 'undefined' && Lampa.Component) {
-        Lampa.Component.add('dlna_folder_stub', {
-            create() { return document.createElement('div'); },
-            start() {
-                const srv = this.activity._srv;
-                const objectId = this.activity._objectId;
-                const title = this.activity.title;
-                setTimeout(() => {
-                    browseFolder(srv, objectId, title);
-                }, 100);
-            },
-            stop() {}, destroy() {}
-        });
     }
 
     // ============================================================
     // ИНИЦИАЛИЗАЦИЯ
     // ============================================================
     function init() {
-        console.log('DLNA Plugin v' + VERSION + ': init');
-
         try {
+            console.log('DLNA Plugin v' + VERSION + ': init');
+
             Lampa.SettingsApi.addComponent({
                 component: 'dlna_plugin',
                 name: 'DLNA Плагин',
                 icon: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>',
                 before: 'interface'
             });
+
             Lampa.SettingsApi.addParam({
                 component: 'dlna_plugin',
                 param: { name: 'dlna_open_btn', type: 'button', default: '' },
                 field: { name: 'Открыть DLNA', description: 'Список серверов и воспроизведение' },
                 onChange: () => {
-                    Lampa.Settings.close();
+                    // НЕ вызываем Lampa.Settings.close - Select показывается поверх
                     setTimeout(showServersList, 300);
                 }
             });
+
+            console.log('DLNA Plugin v' + VERSION + ': ready');
         } catch (e) {
-            console.error('DLNA: settings error', e);
+            console.error('DLNA init error', e);
         }
     }
 
-    if (window.appready) init();
-    else Lampa.Listener.follow('app', function (e) { if (e.type === 'ready') init(); });
+    try {
+        if (window.appready) init();
+        else Lampa.Listener.follow('app', function (e) { if (e.type === 'ready') init(); });
+    } catch (e) {
+        console.error('DLNA boot error', e);
+    }
 })();
