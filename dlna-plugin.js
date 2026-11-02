@@ -1,6 +1,6 @@
 /**
  * DLNA Plugin for Lampa
- * Version: 1.1.0
+ * Version: 1.2.0
  * Target: Android TV (Xiaomi Mi Box S 4K)
  */
 (function () {
@@ -9,7 +9,7 @@
     if (window.dlna_plugin_ready) return;
     window.dlna_plugin_ready = true;
 
-    const VERSION = '1.1.0';
+    const VERSION = '1.2.0';
 
     // ============================================================
     // ХРАНИЛИЩЕ СЕРВЕРОВ
@@ -33,7 +33,7 @@
     };
 
     // ============================================================
-    // СЕТЕВЫЕ ФУНКЦИИ
+    // СЕТЕВЫЕ ФУНКЦИИ (без изменений)
     // ============================================================
     const PATHS_TO_TRY = [
         '/rootDesc.xml', '/description.xml', '/',
@@ -130,7 +130,7 @@
     }
 
     // ============================================================
-    // CSS
+    // CSS (без изменений)
     // ============================================================
     function injectStyles() {
         Lampa.Utils.putStyle(`
@@ -156,61 +156,52 @@
     }
 
     // ============================================================
-    // КОМПОНЕНТ: СПИСОК СЕРВЕРОВ
+    // КОМПОНЕНТЫ (без изменений)
     // ============================================================
     if (typeof Lampa !== 'undefined' && Lampa.Component) {
         Lampa.Component.add('dlna_servers', {
             create() {
-                console.log('DLNA: create dlna_servers');
                 this.el = document.createElement('div');
                 this.el.className = 'dlna-servers';
                 this.el.innerHTML = '<div class="dlna-servers__list"></div>';
                 return this.el;
             },
-            start() {
-                console.log('DLNA: start dlna_servers');
-                this.render();
-            },
+            start() { this.render(); },
             render() {
-                try {
-                    const list = this.el.querySelector('.dlna-servers__list');
-                    if (!list) { console.error('DLNA: list element not found'); return; }
-                    list.innerHTML = '';
-                    const servers = DLNAServers.get();
-                    const lastId = Lampa.Storage.get('dlna_last_server', '');
+                const list = this.el.querySelector('.dlna-servers__list');
+                if (!list) return;
+                list.innerHTML = '';
+                const servers = DLNAServers.get();
+                const lastId = Lampa.Storage.get('dlna_last_server', '');
 
-                    servers.forEach(srv => {
-                        const item = document.createElement('div');
-                        item.className = 'dlna-item selector';
-                        item.innerHTML = `
-                            <div class="dlna-item__title">
-                                <span class="dlna-status dlna-status--checking" data-status-id="${srv.id}"></span>
-                                ${srv.name}${srv.id === lastId ? ' <span style="opacity:.5;font-size:.8em">• последний</span>' : ''}
-                            </div>
-                            <div class="dlna-item__sub">${srv.ip}:${srv.port}</div>`;
-                        item.addEventListener('hover:enter', () => this.openMenu(srv));
-                        list.appendChild(item);
-                        checkServerStatus(srv).then(status => {
-                            const dot = item.querySelector(`[data-status-id="${srv.id}"]`);
-                            if (dot) dot.className = `dlna-status dlna-status--${status}`;
-                        });
+                servers.forEach(srv => {
+                    const item = document.createElement('div');
+                    item.className = 'dlna-item selector';
+                    item.innerHTML = `
+                        <div class="dlna-item__title">
+                            <span class="dlna-status dlna-status--checking" data-status-id="${srv.id}"></span>
+                            ${srv.name}${srv.id === lastId ? ' <span style="opacity:.5;font-size:.8em">• последний</span>' : ''}
+                        </div>
+                        <div class="dlna-item__sub">${srv.ip}:${srv.port}</div>`;
+                    item.addEventListener('hover:enter', () => this.openMenu(srv));
+                    list.appendChild(item);
+                    checkServerStatus(srv).then(status => {
+                        const dot = item.querySelector(`[data-status-id="${srv.id}"]`);
+                        if (dot) dot.className = `dlna-status dlna-status--${status}`;
                     });
+                });
 
-                    const addBtn = document.createElement('div');
-                    addBtn.className = 'dlna-item dlna-item--action selector';
-                    addBtn.innerHTML = '<div class="dlna-item__title">➕ Добавить сервер</div>';
-                    addBtn.addEventListener('hover:enter', () => this.addFlow());
-                    list.appendChild(addBtn);
+                const addBtn = document.createElement('div');
+                addBtn.className = 'dlna-item dlna-item--action selector';
+                addBtn.innerHTML = '<div class="dlna-item__title">➕ Добавить сервер</div>';
+                addBtn.addEventListener('hover:enter', () => this.addFlow());
+                list.appendChild(addBtn);
 
-                    if (servers.length === 0) {
-                        const hint = document.createElement('div');
-                        hint.className = 'dlna-hint';
-                        hint.textContent = 'Серверов пока нет. Нажмите «Добавить сервер».';
-                        list.insertBefore(hint, addBtn);
-                    }
-                    console.log('DLNA: rendered', servers.length, 'servers');
-                } catch (e) {
-                    console.error('DLNA: render error', e);
+                if (servers.length === 0) {
+                    const hint = document.createElement('div');
+                    hint.className = 'dlna-hint';
+                    hint.textContent = 'Серверов пока нет. Нажмите «Добавить сервер».';
+                    list.insertBefore(hint, addBtn);
                 }
             },
             openMenu(srv) {
@@ -299,9 +290,6 @@
             stop() {}, destroy() {}
         });
 
-        // ============================================================
-        // КОМПОНЕНТ: БРАУЗЕР
-        // ============================================================
         Lampa.Component.add('dlna_browser', {
             create() {
                 this.el = document.createElement('div');
@@ -386,52 +374,53 @@
             stop() {},
             destroy() { this._destroyed = true; this.el.remove(); }
         });
-    } else {
-        console.error('DLNA: Lampa.Component API not available');
     }
 
     // ============================================================
-    // ДОБАВЛЕНИЕ ПУНКТА В МЕНЮ (с повтором и несколькими селекторами)
+    // ДОБАВЛЕНИЕ ПУНКТА В МЕНЮ (ИСПРАВЛЕНО)
     // ============================================================
     function addDLNAMenuItem(attempt) {
         attempt = attempt || 0;
-        if (attempt > 15) { console.warn('DLNA: не удалось найти меню'); return; }
-
-        const selectors = [
-            '.menu .menu__list',
-            '.menu__list',
-            '.navigation .menu__list',
-            '.menu-open .menu__list'
-        ];
-        let menu = null, usedSelector = '';
-        for (const sel of selectors) {
-            const el = document.querySelector(sel);
-            if (el) { menu = el; usedSelector = sel; break; }
+        // Увеличиваем количество попыток и интервал: меню на TV может строиться дольше
+        if (attempt > 30) {
+            console.warn('DLNA: не удалось найти меню после 30 попыток');
+            return;
         }
 
-        if (!menu) {
-            console.log('DLNA: menu not found, retry', attempt + 1);
+        // Используем jQuery-селектор, рекомендованный в документации Lampa
+        const $menuList = $('.menu .menu__list').eq(0);
+
+        if (!$menuList.length) {
+            console.log('DLNA: меню ещё не готово, повторная попытка', attempt + 1);
             setTimeout(() => addDLNAMenuItem(attempt + 1), 500);
             return;
         }
 
-        if (menu.querySelector('.menu__item--dlna')) {
-            console.log('DLNA: menu item already exists');
+        // Проверяем, не добавлен ли уже пункт
+        if ($menuList.find('.menu__item--dlna').length) {
+            console.log('DLNA: пункт меню уже существует');
             return;
         }
 
-        console.log('DLNA: adding menu item to', usedSelector);
-        const btn = document.createElement('li');
-        btn.className = 'menu__item selector menu__item--dlna';
-        btn.innerHTML = `<div class="menu__ico">
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>
-        </div><div class="menu__text">DLNA</div>`;
-        btn.addEventListener('hover:enter', () => {
-            console.log('DLNA: menu clicked');
+        console.log('DLNA: добавляем пункт в главное меню');
+        const btn = $(`
+            <li class="menu__item selector menu__item--dlna">
+                <div class="menu__ico">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+                        <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
+                    </svg>
+                </div>
+                <div class="menu__text">DLNA</div>
+            </li>
+        `);
+
+        btn.on('hover:enter', () => {
+            console.log('DLNA: пункт меню нажат');
             Lampa.Activity.push({ component: 'dlna_servers', title: 'DLNA серверы' });
         });
-        menu.appendChild(btn);
-        console.log('DLNA: menu item added');
+
+        $menuList.append(btn);
+        console.log('DLNA: пункт меню успешно добавлен');
     }
 
     // ============================================================
@@ -464,6 +453,7 @@
             });
         } catch (e) { console.error('DLNA: settings error', e); }
 
+        // Запускаем добавление пункта меню с небольшой задержкой
         addDLNAMenuItem();
     }
 
