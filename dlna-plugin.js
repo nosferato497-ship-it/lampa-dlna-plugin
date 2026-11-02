@@ -1,13 +1,13 @@
 /**
  * DLNA Plugin for Lampa
- * Version: 2.1.0 — defensive, no Lampa.Settings.close, no AbortSignal.timeout
+ * Version: 2.2.0 — uses Lampa.Request (Android Native Bridge) to bypass CORS
  */
 (function () {
     'use strict';
     if (window.dlna_plugin_ready) return;
     window.dlna_plugin_ready = true;
 
-    const VERSION = '2.1.0';
+    const VERSION = '2.2.0';
 
     function noty(text, style, time) {
         try {
@@ -18,7 +18,7 @@
         } catch (e) { console.log('DLNA noty:', text); }
     }
 
-    // Хранилище
+    // Хранилище (без изменений)
     const DLNAServers = {
         get()      { try { return Lampa.Storage.get('dlna_servers', []); } catch (e) { return []; } },
         save(list) { try { Lampa.Storage.set('dlna_servers', list); } catch (e) {} },
@@ -37,19 +37,33 @@
         remove(id) { this.save(this.get().filter(s => s.id !== id)); }
     };
 
-    // Сеть: fetch с таймаутом через Promise.race (без AbortSignal.timeout)
-    function fetchTimeout(url, opts, ms) {
-        opts = opts || {};
-        ms = ms || 3000;
+    // ============================================================
+    // НОВАЯ ФУНКЦИЯ: ЗАПРОС ЧЕРЕЗ Lampa.Request (обход CORS)
+    // ============================================================
+    function request(url, options) {
         return new Promise((resolve, reject) => {
-            const timer = setTimeout(() => reject(new Error('timeout')), ms);
-            fetch(url, opts).then(
-                (r) => { clearTimeout(timer); resolve(r); },
-                (e) => { clearTimeout(timer); reject(e); }
-            );
+            try {
+                // Lampa.Request.get — это обертка, которая на Android использует нативный мост
+                Lampa.Request.get(url, (data) => {
+                    // Успешный ответ
+                    resolve({
+                        ok: true,
+                        text: () => Promise.resolve(typeof data === 'string' ? data : JSON.stringify(data)),
+                        json: () => Promise.resolve(data)
+                    });
+                }, (error) => {
+                    // Ошибка
+                    reject(new Error(error || 'Request failed'));
+                }, options); // options может содержать method, body, headers
+            } catch (e) {
+                reject(e);
+            }
         });
     }
 
+    // ============================================================
+    // ПРОБИНГ СЕРВЕРА (через Lampa.Request)
+    // ============================================================
     const PATHS_TO_TRY = [
         '/rootDesc.xml', '/description.xml', '/',
         '/DeviceDescription.xml', '/upnp/rootDesc.xml', '/root.xml'
@@ -57,16 +71,17 @@
 
     async function probeServer(ip, port) {
         for (const path of PATHS_TO_TRY) {
+            const url = `http://${ip}:${port}${path}`;
             try {
-                const url = `http://${ip}:${port}${path}`;
-                const resp = await fetchTimeout(url, {}, 3000);
-                if (!resp.ok) continue;
+                const resp = await request(url);
                 const text = await resp.text();
                 const doc = new DOMParser().parseFromString(text, 'text/xml');
                 if (doc.querySelector('device') || doc.querySelector('serviceList')) {
                     return { path, xml: text, doc };
                 }
-            } catch (e) { /* next */ }
+            } catch (e) {
+                // Пробуем следующий путь
+            }
         }
         return null;
     }
@@ -84,6 +99,9 @@
         return null;
     }
 
+    // ============================================================
+    // BROWSE (через Lampa.Request)
+    // ============================================================
     async function browseDirectory(controlURL, objectId) {
         objectId = objectId || '0';
         const soapBody = `<?xml version="1.0" encoding="utf-8"?>
@@ -92,15 +110,16 @@
 <ObjectID>${objectId}</ObjectID><BrowseFlag>BrowseDirectChildren</BrowseFlag>
 <Filter>*</Filter><StartingIndex>0</StartingIndex><RequestedCount>0</RequestedCount>
 <SortCriteria></SortCriteria></u:Browse></s:Body></s:Envelope>`;
-        const resp = await fetchTimeout(controlURL, {
+
+        const resp = await request(controlURL, {
             method: 'POST',
             headers: {
                 'Content-Type': 'text/xml; charset="utf-8"',
                 'SOAPAction': '"urn:schemas-upnp-org:service:ContentDirectory:1#Browse"'
             },
             body: soapBody
-        }, 8000);
-        if (!resp.ok) throw new Error('Browse failed: ' + resp.status);
+        });
+
         const text = await resp.text();
         return parseBrowseResponse(text);
     }
@@ -161,7 +180,7 @@
     }
 
     // ============================================================
-    // СПИСОК СЕРВЕРОВ
+    // ОСТАЛЬНОЙ UI-КОД (без изменений, кроме вызовов)
     // ============================================================
     function showServersList() {
         try {
@@ -191,9 +210,6 @@
         }
     }
 
-    // ============================================================
-    // МЕНЮ СЕРВЕРА
-    // ============================================================
     function openServerMenu(srv) {
         try {
             Lampa.Select.show({
@@ -246,10 +262,8 @@
         } catch (e) { console.error('confirmDelete error', e); }
     }
 
-    // ============================================================
-    // ДОБАВЛЕНИЕ СЕРВЕРА
-    // ============================================================
     const PRESETS = [
+        { name: 'Keenetic', port: '8200' },
         { name: 'MiniDLNA', port: '8200' },
         { name: 'Plex', port: '32469' },
         { name: 'Jellyfin', port: '8096' },
@@ -380,9 +394,6 @@
         } catch (e) { console.error('editServerFlow error', e); }
     }
 
-    // ============================================================
-    // НАВИГАЦИЯ ПО ПАПКАМ (Select-only, с ручным стеком)
-    // ============================================================
     let navStack = [];
 
     async function openServerRoot(srv) {
@@ -514,7 +525,6 @@
                 param: { name: 'dlna_open_btn', type: 'button', default: '' },
                 field: { name: 'Открыть DLNA', description: 'Список серверов и воспроизведение' },
                 onChange: () => {
-                    // НЕ вызываем Lampa.Settings.close - Select показывается поверх
                     setTimeout(showServersList, 300);
                 }
             });
