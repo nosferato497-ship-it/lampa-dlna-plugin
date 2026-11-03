@@ -715,18 +715,48 @@
         }, goBack);
     }
 
+    // Разрешает URL постера: абсолютный оставляет как есть,
+    // относительный — достраивает относительно адреса сервера.
+    // Без этого постеры с Keenetic/MiniDLNA не отображаются.
+    function resolvePoster(poster) {
+        poster = trim(poster);
+        if (!poster) return '';
+        if (/^https?:\/\//i.test(poster)) return poster;
+        try {
+            if (navStack.length && navStack[0].srv) {
+                var srv = navStack[0].srv;
+                var base = 'http://' + srv.ip + ':' + srv.port + '/';
+                return resolveURL(poster, base) || '';
+            }
+        } catch (e) {}
+        return poster;
+    }
+
     function playVideo(item, siblings) {
         try {
             var videos = (siblings || []).filter(function (it) { return it.type === 'video'; });
             var data = {
                 url: item.url,
-                title: item.title
+                title: item.title,
+                card: {
+                    title: item.title,
+                    poster_path: resolvePoster(item.poster),
+                    overview: item.description || ''
+                }
             };
             Lampa.Player.play(data);
             if (videos.length > 1) {
                 try {
                     Lampa.Player.playlist(sortItems(videos).map(function (v) {
-                        return { url: v.url, title: v.title };
+                        return {
+                            url: v.url,
+                            title: v.title,
+                            card: {
+                                title: v.title,
+                                poster_path: resolvePoster(v.poster),
+                                overview: v.description || ''
+                            }
+                        };
                     }));
                 } catch (e) {}
             }
